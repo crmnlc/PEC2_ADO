@@ -7,7 +7,7 @@ output:
     theme: united
     toc: yes
     number_sections: true
-    toc_depth: 3
+    toc_depth: 4
     fig_caption: yes
 urlcolor: blue
 header-includes:
@@ -64,13 +64,18 @@ Si nos fijamos en la Figura \@ref(fig:fig1), nosotros empezaríamos nuestro *pip
 
 
 ```{r fig1, echo=FALSE, out.width='100%', fig.align='center', fig.cap="Visión general del proceso de detección de expresión diferencial de genes. A la izquierda podemos ver el proceso de forma más amplia y a la derecha el proceso bioinformático de fomra más detallada con cada una de las etapas en rojo y los métodos utilizados en azul [@pobre_arraiano_2018][@oshlack2010]."}
-knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagen1.png")
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/imagen1.png")
 ```
 
 
 ## Métodos de análisis
 
 En este caso no partiremos de los datos crudos devueltos por el secuenciador, es decir, no partiremos de un archivo en el que únicamente encontraremos los fragmentos de lecturas cortas. Por el contrario, partiremos de una matriz de conteos en la que ya tendremos las lecturas mapeadas y tendremos el número de lecturas para cada muestra y cada gen, pero antes realizaremos el muestreo aleatorio que se nos pedía en el enunciado para que cada alumno partiese de unos datos distintos. Construiremos un nuevo objeto que sea adecuado para el análisis posterior (``` DESeqDataSet ```).
+
+Con este objeto realizaremos la normalización de los datos de conteo con la Transformación de estabilización de varianza (VST). Después exploraremos y visualizaremos los datos mediante Heatmaps de las distancias muestrales, gráficas componentes principales (PCA) y gráficas de escalado multidimensional (MDS). 
+
+El análisis de expresión diferencial se realizará con el paquete ```DESeq``` para seguir con las tablas de resultados y subagrupar los genes más diferencialmente expresados en base al p-valor ajustado o el log-change. Estos resultados se representarán en gráficos para una mejor visualización. Las listas de genes obtenios se anotarán y se intentará realizar un análisis de significación biológica utilizando la base de datos Gene Ontology.
+
 
 
 
@@ -93,13 +98,21 @@ if(!require(ReportingTools)) BiocManager::install("ReportingTools")
 if(!require(RUVSeq)) BiocManager::install("RUVSeq")
 if(!require(sva)) BiocManager::install("sva")
 if(!require(Gviz)) BiocManager::install("Gviz")
-
-if(!require(magrittr)) install.packages("magrittr", dep=TRUE)
 if(!require(dplyr)) install.packages("dplyr", dep=TRUE)
+if(!require(magrittr)) install.packages("magrittr", dep=TRUE)
 if(!require(ggplot2)) install.packages("ggplot2", dep=TRUE)
 if(!require(pheatmap)) install.packages("pheatmap", dep=TRUE)
 if(!require(RColorBrewer)) install.packages("RColorBrewer", dep=TRUE)
 if(!require(ggbeeswarm)) install.packages("ggbeeswarm", dep=TRUE)
+if(!require(PoiClaClu)) install.packages("PoiClaClu", dep=TRUE)
+if(!require(glmpca)) install.packages("glmpca", dep=TRUE)
+```
+
+```{r eval=FALSE, include=TRUE}
+if(!require(tximport)) install.packages("tximport", dep=TRUE) 
+if(!require(htseq-count)) install.packages("htseq-count", dep=TRUE) 
+if(!require(featureCounts)) install.packages("featureCounts", dep=TRUE) 
+if(!require(summarizeOverlaps)) install.packages("summarizeOverlaps", dep=TRUE)
 ```
 
 # Obtención y lectura de los datos
@@ -108,54 +121,738 @@ if(!require(ggbeeswarm)) install.packages("ggbeeswarm", dep=TRUE)
 
 Los datos en los que se basan esta PEC se han obtenido a partir de un estudio obtenido del repositorio *Genotype Tissue Expression* (GTEx). Este repositorio se trata de un proyecto para construir una base de datos de investigación de expresión y regulación génica específica de cada tejido, conteniendo datos de 54 tejidos distintos recogidos de 1000 individuos distintos. En esta práctica nos centraremos en datos de expresión (RNA-seq) de un análisis de tiroides en donde se compara tres tipos de infiltración medido en un total de 292 muestras pertenecientes a los tres grupos que hemos citado en la introducción.
 
+## Localización de los datos
+
+Como ya hemos estado trabajando durante el curso, escogeremos un directorio en concreto que lo asignaremos como nuestro directorio de trabajo y lo guardaremos en la variable ```workingDir```.
+
+A partir de este directorio crearemos 3 subcarpetas: Una carpeta llamada *datos* en la que encontraremos los datos de partida, es decir, los archivos *targets.csv* y *counts.csv*; una carpeta llamada *imagenes*, con las figuras que hayamos puesto en el texto y gráficas creadas en el proceso de análisis y una última carpeta llamada *resultados* en la que guardaremos archivos que se originen en el proceso de análisis.
+
+```{r}
+workingDir <-getwd()
+dataDir <- file.path(workingDir, "datos")
+resultsDir <- file.path(workingDir,"resultados")
+imagDir <- file.path(workingDir,"imagenes")
+setwd(workingDir)
+```
+
+```{r echo=FALSE, warning=FALSE}
+dir.create("datos")
+dir.create("resultados")
+dir.create("imagenes")
+```
+
+Estos pasos los podemos realizar dentro de la consola de comandos de R o mediante el explorador de archivos de windows. En github podremos encontrar un repositorio con todos los archivos iniciales y creados a lo largo del análisis: https://github.com/crmnlc/PEC2_ADO.
+
 ## Selección de muestras para el análisis
+
+Este estudio se basa en un subconjunto de muestras del estudio original, cogiendo únicamente 10 muestras para cada grupo. Las muestras se han obtenido de los archivos originales de targets y counts mediante un script de R.
+
+Lo primero que tenemos que hacer es abrir los dos archivos originales y, a partir de los datos del archivo targets fijarnos en la columna *groups* y así podemos saber el grupo de muestras al que pertenece y realizas un subconjunto con cada grupo. Los dos archivos tienen en común que las 292 variables del archivo counts (las columnas) tienen el mismo nombre que la variable "Sample_name" del archivo targets.
+
+```{r}
+# Importamos los archivos originales de targets y counts
+
+targets <- read.csv(file.path(dataDir, "targets.csv"), header=TRUE, row.names=1, sep=",", stringsAsFactors=FALSE)
+counts <- read.csv(file.path(dataDir, "counts.csv"), header=TRUE, row.names=1, sep=";", stringsAsFactors=FALSE)
+
+# Realizamos subconjuntos del archivo targets basándonos en la variable Group
+
+NIT <- subset(targets, targets$Group == "NIT")
+ELI <- subset(targets, targets$Group == "ELI")
+SFI <- subset(targets, targets$Group == "SFI")
+
+# Llevamos a cabo el muestreo aleatorio para cada una de las muestras. Obtendremos vectores tipo char con 10 nombres de muestras de cada grupo.
+
+set.seed(123)
+NIT_10 <- sample(NIT$Sample_Name, 10, replace = FALSE)
+ELI_10 <- sample(ELI$Sample_Name, 10, replace = FALSE)
+SFI_10 <- sample(SFI$Sample_Name, 10, replace = FALSE)
+
+# Si nos fijamos en los vectores de nombre de muestra no son realmente idénticos puesto que los nombres del archivo targets estaban guionizados, mientras que los nombres del archivo counts tienen un ".". Tendremos 
+
+colnames(counts) <- gsub("\\.", "-", colnames(counts))
+
+# Función para obtener tres datasets, uno por cada grupo, con los datos de counts para las 10 muestras que hemos obtenido al azar.
+
+dataNIT <- counts[, colnames(counts) %in% NIT_10]
+dataELI <- counts[, colnames(counts) %in% ELI_10]
+dataSFI <- counts[, colnames(counts) %in% SFI_10]
+
+# Ahora juntamos los tres Dataframes y lo guardamos en un archivo llamado "countsnew"
+
+countsnew <- cbind(dataNIT,dataELI)
+countsnew <- cbind(countsnew, dataSFI)
+
+# Tenemos que coger del archivo targets solo los datos y juntarlos en el mismo Dataframe
+
+targetsNIT <- targets[targets$Sample_Name %in% NIT_10,]
+targetsELI <- targets[targets$Sample_Name %in% ELI_10,]
+targetsSFI <- targets[targets$Sample_Name %in% SFI_10,]
+targetsnew <- rbind(targetsNIT,targetsELI)
+targetsnew <- rbind(targetsnew, targetsSFI)
+
+```
+
+Finalmente obtenemos dos archivos nuevos, ```targetsnew``` y ```countsnew```. 
+
+```{r}
+# Guardaremos estos archivos generados en la carpeta de resultados.
+
+write.csv(countsnew, file=file.path(resultsDir, "counts_new.csv"))
+write.csv(targetsnew, file=file.path(resultsDir, "targets_new.csv"))
+```
 
 ## Lectura de los datos
 
+Comenzaremos este análisis a partir de los dos archivos construídos en el paso anterior, es decir, a partir de la matriz de conteos y la tabla con la informació de cada muestra. Vamos a echar un vistazo a nuestra tabla con la información de cada muestra y a nuestra matriz de conteos (Ver \@ref(tab:tab1) y \@ref(tab:tab2), respectivamente). 
+
+Podemos observar que en la **matriz de conteos**, cada fila representa un gen y cada columna una muestra específica. Los valores numéricos que encontramos se refieren al número de fragmentos que se asignan a un gen específico en cada librería. 
+
+```{r tab1, echo=FALSE}
+knitr::kable(
+targetsnew[1:5,], booktabs = TRUE,
+caption = 'Tabla de información de cada muestra para las 5 primeras muestras'
+)
+```
+
+```{r tab2, echo=FALSE}
+knitr::kable(
+countsnew[1:5, 1:5], booktabs = TRUE,
+caption = 'Matriz de conteos del estudio en la que aparecen los 5 primeros genes y las 5 primeras muestras'
+)
+```
+
+Es muy importante en este proceso que el orden en el que aparecen las muestras en la matriz de conteos sea el mismo orden en el que aparecen las muestras en la tabla de información de muestras.
+
+```{r}
+colnames(countsnew) == targetsnew$Sample_Name
+```
+
+Así podemos confirmar que el orden coincide. Ya tenemos todos los archivos necesarios para crear el objeto ```DESeqDataSet```que nos permitirá un mejor análisis de los datos, para ello utilizaremos la función ```DESeqDataSetFromMatrix```.
+
+```{r}
+ddsMat <- DESeqDataSetFromMatrix(countData = countsnew,
+                                  colData = targetsnew,
+                                  design = ~ Group)
+ddsMat
+```
+
+
 # Preprocesado: Exploración, Control de Calidad y Normalización
+
+En este apartado realizaremos uno de los pasos más importantes para el análisis estadístico, el control de calidad y la exploración de los datos. Este proceso se suele lleva a cabo al inicio del análisis antes o al mismo tiempo que la normalización de los datos y los test de expresión diferencial.
+
+Este paso lo podemos dividir en dos partes: Una primera parte de transformaciones de los conteos para explorar de forma gráfica relaciones entre muestras y una segunda parte de visualización de los datos sin normalizar para las pruebas estadísticas. El objetivo es encontrar muestras que produzcan puntos en nuestro análisis que sean perjudiciales y puedan llevarnos a errores en nuestra búsqueda de genes diferencialmente expresados.
+
+## Normalización y Filtraje
+
+### Prefiltrado de la base de datos
+
+La matriz de conteos, y por tanto el archivo *DESeqDataSet*, presenta varias filas nulas o con pocos fragmentos por muestra/gen. Con el objetivo de disminuir el tamaño del objeto, optimizar el análisis, y reducir el tiempo de ejecución de las funciones, eliminaremos los valores de la matriz de conteos que no nos aporten información relevante sobre la expresión génica, es decir las filas de *DESeqDataSet* que no tengan o tengan pocos conteos.
+
+```{r}
+# Número de filas que tiene el archivo DESeqDataSet
+nrow(ddsMat)
+```
+
+```{r}
+# Subconjunto de DESeqDataSet, quedándonos con las filas con sumatorio de conteos mayores a 1 y guardamos este cambio en el objeto.
+keep <- rowSums(counts(ddsMat)) > 1
+ddsMat <- ddsMat[keep,]
+nrow(ddsMat)
+```
+
+Pasamos de tener un objeto con 56202 filas a un objeto con 43186 filas.
+
+### Transformación de estabilización de varianza (VST) y rlog
+
+Muchos métodos estadísticos de visualización y exploración de datos trabajan mejor con versiones de los datos de conteos que han sido transformados. La distribución de los datos de la matriz de conteos está bastante sesgada debido a que los genes con más conteos muestran diferencias más grandes entre muestras, es por ello que una transformación de los datos ayuda a normalizar la distribución. Estos datos podemos transformarlos con distintos métodos entre los que destacan *VST*, *rlog* o *log2* pero, ¿qué transformación debemos escoger? En nuestro caso utilizaremos la transformación VST, aunque *rlog* es también válida. Esto es debido a que a diferencia de la transformación *log2* en la que los genes con pocos conteos (parte baja-izquierda de la gráfica) son muy variables, en las gráficas de *rlog* y *VST* estos genes aportan menor información sobre la expresión diferencial (Ver Figura \@ref(fig:fig2)) .
+
+```{r}
+vsd <- vst(ddsMat, blind = FALSE)
+head(assay(vsd), 3)
+```
+
+```{r}
+rld <- rlog(ddsMat, blind = FALSE)
+head(assay(rld), 3)
+```
+
+```{r echo = T, results = 'hide', message=FALSE, fig.show = 'hide'}
+library("dplyr")
+library("ggplot2")
+
+ddsMat <- estimateSizeFactors(ddsMat)
+
+df <- bind_rows(
+  as.data.frame(log2(counts(ddsMat, normalized=TRUE)[, 1:2]+1)) %>%
+         mutate(transformation = "log2(x + 1)"),
+  as.data.frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as.data.frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+  
+colnames(df)[1:2] <- c("x", "y")  
+
+lvls <- c("log2(x + 1)", "vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation)  
+```
+
+```{r fig2, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráficos de distribución de los datos transformados."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/transformations.png")
+```
+
 
 ## Exploración y visualización
 
 ### Exploración estadística de los datos
 
-### Control de calidad
+#### Distancias muestrales
 
-### Archivos de los resultados del control de calidad
+Una primera aproximación para el análisis de RNA-seq es observar la similitud general entre muestras, para ello podemos utilizar la función ```dist()```de R, que nos permite calcular la distancia Euclidea entre muestras. Este abordaje lo realizaremos con los datos transformados por el método VST para estar seguros que hay una contribución equivalente de todos los genes.
 
-## Normalización y Filtraje
+```{r results='hide'}
+sampleDists <- dist(t(assay(vsd)))
+sampleDists
+```
 
-### Filtraje
+Podemos visualizar las distancias en un *heatmap* en la Figura \@ref(fig:fig3), utilizando la función *pheatmap* del paquete *pheatmap*. En esta figura hemos cambiado los nombres de las filas de la matriz de distancias por el Shortname de la muestra en el que aparece también el grupo al que pertenece la muestra.
 
-### Archivos de los resultados normalizados
+```{r echo = T, results = 'hide', message=FALSE, fig.show = 'hide'}
+library("pheatmap")
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <-  vsd$ShortName
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+library("pheatmap")
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <-  vsd$ShortName
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
 
-# Selección de genes diferencialmente expresados
+```{r fig3, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Heatmap de distancias muestra-muestra utilizando los valores transformados por VST."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/distanciasVST.png")
+```
 
-## Seleccion básica de genes en una comparación entre dos grupos
+Otra opción para calcular las distancias entre muestras es la *Distancia de Poisson* con el paquete ```PoiClaClu```. En este caso no es necesario que utilicemos los datos transformados por VST puesto que ya tiene en consideración la varianza inherente a los conteos. Esta distancia utiliza los datos de la matriz de conteos original. Podemos observar el Heatmap creado en la Figura \@ref(fig:fig4).
 
-### Cálculo de estadísticos de test y p-valores
+```{r}
+library("PoiClaClu")
+poisd <- PoissonDistance(t(counts(ddsMat)))
+```
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- ddsMat$ShortName
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+
+```{r fig4, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Heatmap de distancias muestra-muestra utilizando la distancia de Poisson."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/distanciasVST.png")
+```
+
+Si comparamos ambas figuras, podemos ver que la distribución de las muestras cambia, teniendo en cuenta que en los Heatmaps las filas y columnas de la matriz se organizan por un método de *clustering* o agrupamiento para que las filas y columnas más parecidas se encuentren cerca, entonces podemos decir que estos grupos son distintos según el método utilizado. También visualizamos que en el Heatmap construído a partir de la distancia de Poisson las celdas son de colores más oscuros por lo que las distancias entre muestras parecen ser menores, es decir, que las muestras son más parecidas entre sí. Otra cosa que llama la atención es que no encontramos todas las muestras del mismo grupo juntas, es decir, las muestras de ELI separadas de las de NIT y SFI, aunque sí que encontramos muchas muestras de ELI juntas en la matriz de distancias.
+
+#### Gráficos PCA
+
+Otra manera de visualizar las diferencias entre muestras es el **Análisis de componentes principales** (PCA). Con este método las muestras se pyectan en un plano 2D y se esparcen en dos direcciones que explican la mayoría de las diferencias entre ellas. En este espacio, el eje x es la dirección que más separa los puntos entre sí, es el eje de la primera componente (PC1). En el eje y tendremos la segunda dirección que separa más los datos, PC2. El porcentaje de varianza total se encuentra en cada eje. En el caso de nuestro estudio, una de las variables que más va a explicar la varianza entre muestras es el grupo al que pertenece la muestra y la otra variable podría ser el sexo del individuo.
+
+En la Figura \@ref(fig:fig5) podemos ver que la mayoría de muestras sí que parece ordenarse en clusters de muestras con el mismo grupo y sexo, por ejemplo, vemos todas las muestras de NIT:male cercanas, al igual que las de ELI:male y las de ELI:female (a excepción de una). También es cierto que algunos grupos se quedan sin apenas representación debido a que las muestras se eligieron al azar teniendo en cuenta el grupo y no el sexo del individuo. Por otra parte podemos decir que la variable del grupo, componente principal, es la responsable de un 58% de la varianza entre muestras, mientras que el sexo es solamente responsable del 9% de varianza.
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+plotPCA(vsd, intgroup = c("Group", "sex"))
+```
+
+```{r fig5, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráfico PCA utilizando los datos de VST."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/PCA_VST.png")
+```
+
+### Gráficos PCA con Análisis de componentes principales generalizadas
+
+Otra técnica que se usa para datos que no siguen una distribución normal es el análisis de componentes principales generalizadas (GLM-PCA), implementada en el paquete *glmpca*. Este paquete utiliza como input la matriz de conteos y el número de dimensiones que queremos utilizar.
+
+En la figura \@ref(fig:fig6) podemos encontrar este gráfico. Lo interesante en este caso sería que todos los puntos del mismo color se encontrasen más o menos cercanos en la gráfica. Las muestras de ELI parecen más agrupadas a excepción de dos muestras, independientemente del sexo del individuo. El resto de grupos parecen estar más dispersos.
+
+```{r}
+library("glmpca")
+gpca <- glmpca(counts(ddsMat), L=2)
+gpca.dat <- gpca$factors
+gpca.dat$Group <- ddsMat$Group
+gpca.dat$sex <- ddsMat$sex
+```
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+ggplot(gpca.dat, aes(x = dim1, y = dim2, color = Group, shape = sex)) +
+  geom_point(size =3) + coord_fixed() + ggtitle("glmpca - Generalized PCA")
+```
+
+```{r fig6, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráfico GLM-PCA utilizando los datos sin normalizar."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/GLM_PCA.png")
+```
+
+#### Gráfica de escalado multidimensinal
+
+Este tipo de gráficas son útiles cuando solo tenemos una matriz de distancias. Construiremos este gráfico para las distancias calculadas de los datos normalizados por el método *VST*. El gráfico MDS para los datos normalizados mediante *VST* lo podemos ver en la Figura \@ref(fig:fig7) y parece que las muestras del mismo Grupo tienden a estar juntas. En la Figura \@ref(fig:fig8) se muestra la misma gráfica pero utilizando la distancia de Poisson.
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+mds <- as.data.frame(colData(vsd))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = Group, shape = sex)) +
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with VST data")
+```
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+mdsPois <- as.data.frame(colData(ddsMat)) %>%
+   cbind(cmdscale(samplePoisDistMatrix))
+ggplot(mdsPois, aes(x = `1`, y = `2`, color = Group, shape = sex)) +
+  geom_point(size = 3) + coord_fixed() + ggtitle("MDS with PoissonDistances")
+```
+
+
+```{r fig7, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráfico MDS utilizando los datos de VST."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/MDS_VST.png")
+```
+
+```{r fig8, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráfico MDS usando las distancias de Poisson."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/MDS_Poisson.png")
+```
+
+
+# Análisis de expresión diferencial
+
+## Ejecutando el pipeline de expresión diferencial
+
+El análisis de expresión diferencial se puede ejecutar con la función ```DESeq``` de forma sencilla utilizando como input nuestro archivo ```ddsMat```. Esto es debido a que el diseño experimental lo hemos específicado a la hora de crear el archivo *DESeqDataSet* con la opción ```desing = ~ Group```. La función ```DESeq``` imprimirá un mensaje por cada paso del análisis que esté realizando, entre estos pasos tenemos:
+
+* Estimación del tamaño de los factores
+* Estimación de los valores de dispersión para cada gen
+* Ajuste de un modelo lineal
+
+Esta función devuelve un archivo *DESeqDataSet* con todos los parámetros ajustados. En los siguientes apartados veremos cómo extraer las tablas con resultados de interés.
+
+```{r}
+ddsMat <- DESeq(ddsMat)
+```
+
+
+## Construyendo la tabla de resultados
+
+En el enunciado de esta PEC se nos pedía que hiciesemos tres comparaciones, dado que había tres grupos: SFI-NIT, ELI-NIT y ELI-SFI. Podemos producir la tabla de resultados para cada comparación utilizando la función ```results``` y un comando con argumentos que especifiquen que queremos  fijarnos en la variable *Group* del diseño experimental y entre qué niveles queremos realizar la comparación.
+
+**SFI-NIT**
+
+```{r}
+resSFI_NIT <- results(ddsMat, contrast=c("Group","SFI","NIT"))
+resSFI_NIT
+```
+
+**ELI-NIT**
+
+```{r}
+resELI_NIT <- results(ddsMat, contrast=c("Group","ELI","NIT"))
+resELI_NIT
+```
+
+**ELI-SFI**
+
+```{r}
+resELI_SFI <- results(ddsMat, contrast=c("Group","ELI","SFI"))
+resELI_SFI
+```
+
+Estos archivos ```res``` son *Dataframes*, por lo que podemos ver el significado de cada una de las columnas.
+
+```{r}
+mcols(resSFI_NIT, use.names = TRUE)
+```
+
+La columna ```baseMean```, es una media de los valores de conteos normalizados divididos por el tamaño de los factores, sobre todas las muestras en *DESeqDataSet*. Las columnas restantes se refieren al contraste en específico. La columna ```log2FoldChange``` es el efecto de muestra estimado, es decir, cuánto parece haber cambiado la expresión génica debido al grupo al que pertenece la muestra o tipo de infiltración. Este valor tiene una incertidumbre que se ve reflejada en la columna ```lfcSE```. Uno de los estadísticos más importantes aquí es el ```pvalue``` que nos indica la probabilidad de que un fold change igual o mayor al observado se de en la situación descrita por la hipótesis nula.
+
+Podemos resumir los resultados de las tres comparaciones con el siguiente código:
+
+**SFI-NIT**
+
+
+```{r}
+summary(resSFI_NIT)
+```
+
+**ELI-NIT**
+
+```{r}
+summary(resELI_NIT)
+```
+
+**ELI-SFI**
+
+```{r}
+summary(resELI_SFI)
+```
+
+Dado que este análisis lo hemos realizado con un nivel de FDR del 10%, observamos muchos genes con expresión diferencial. Hay dos maneras de ser más restrictivo en cuanto a qué genes considerar significativos:
+
+Bajar el umbral del FDR:
+
+**SFI-NIT**
+
+```{r}
+resSFI_NIT.05  <- results(ddsMat, contrast=c("Group","SFI","NIT"), alpha = 0.05)
+table(resSFI_NIT.05$padj < 0.05)
+```
+
+**ELI-NIT**
+
+```{r}
+resELI_NIT.05  <- results(ddsMat, contrast=c("Group","ELI","NIT"), alpha = 0.05)
+table(resELI_NIT.05$padj < 0.05)
+```
+
+**ELI-SFI**
+
+```{r}
+resELI_SFI.05  <- results(ddsMat, contrast=c("Group","ELI","SFI"), alpha = 0.05)
+table(resELI_SFI.05$padj < 0.05)
+```
+
+O elevar el valor del umbral del log2 fold change:
+
+**SFI-NIT**
+
+```{r}
+resSFI_NITLFC1 <- results(ddsMat, contrast=c("Group","SFI","NIT"), lfcThreshold=1)
+table(resSFI_NITLFC1$padj < 0.1)
+```
+
+**ELI-NIT**
+
+```{r}
+resELI_NITLFC1 <- results(ddsMat, contrast=c("Group","ELI","NIT"), lfcThreshold=1)
+table(resELI_NITLFC1$padj < 0.1)
+```
+
+**ELI-SFI**
+
+```{r}
+resELI_SFILFC1 <- results(ddsMat, contrast=c("Group","ELI","SFI"), lfcThreshold=1)
+table(resELI_SFILFC1$padj < 0.1)
+```
 
 ### Selección de los genes [más] expresados diferencialmente
 
-### Ajuste de p-valores para comparaciones múltiples
+Si consideramos un 10% de FDR (Fracción de falsos positivos) aceptable, podemos considerar que todos los genes con un p-valor ajustado por debajo de 10% = 0.1 como significativos. Podemos sacar el número de genes de la siguiente manera:
+
+**SFI-NIT**
+
+```{r}
+sum(resSFI_NIT$padj < 0.1, na.rm=TRUE)
+```
+
+**ELI-NIT**
+
+```{r}
+sum(resELI_NIT$padj < 0.1, na.rm=TRUE)
+```
+
+**ELI-SFI**
+
+```{r}
+sum(resELI_SFI$padj < 0.1, na.rm=TRUE)
+```
+
+Aquí comprobamos que el número de genes significativamente expresados diferencialmente para la comparación SFI-NIT es de 1658 (el menor número), seguido de la comparación ELI-SFI con 4752 genes y parece que los grupos más dispares entre sí serían los grupos ELI-NIT con 5059 genes expresados diferencialmente.
+
+Ahora, realizamos el subconjunto de las filas de la tabla de resultados cuyo ```padj``` sea menor de 0.1, para cada una de las comparaciones. Este subconjunto de genes después los podemos ordenar por su ```log2FoldChange``` (de menor a mayor una regulación negativa (down-regulation) y de mayor a menor una regulación positiva (up-regulation)).
+
+**SFI-NIT**
+
+Regulación negativa
+
+```{r}
+resSFI_NITSig <- subset(resSFI_NIT, padj < 0.1)
+head(resSFI_NITSig[ order(resSFI_NITSig$log2FoldChange), ])
+```
+
+Regulación positiva
+
+```{r}
+head(resSFI_NITSig[ order(resSFI_NITSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+
+**ELI-NIT**
+
+Regulación negativa
+
+```{r}
+resELI_NITSig <- subset(resELI_NIT, padj < 0.1)
+head(resELI_NITSig[ order(resELI_NITSig$log2FoldChange), ])
+```
+
+Regulación positiva
+
+```{r}
+head(resELI_NITSig[ order(resELI_NITSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+
+**ELI-SFI**
+
+Regulación negativa
+
+```{r}
+resELI_SFISig <- subset(resELI_SFI, padj < 0.1)
+head(resELI_SFISig[ order(resELI_SFISig$log2FoldChange), ])
+```
+
+Regulación positiva
+
+```{r}
+head(resELI_SFISig[ order(resELI_SFISig$log2FoldChange, decreasing = TRUE), ])
+```
+
+## Representando los resultados
+
+### Gráficas de conteos
+
+Una manera sencilla de visualizar los conteos de un gen en concreto es mediante la fución *plotCounts*, que usa como argumentos el objeto *DESeqDataSet*, un nombre del gen (en este caso usaremos el que tiene un padj menor) y el grupo o variable sobre el que queremos representar los conteos, en nuestro caso el grupo al que pertenecen las muestras.
+
+En las Figuras \@ref(fig:fig9), \@ref(fig:fig10) y \@ref(fig:fig11) observamos gráficos en los que se representan los conteos normalizados del TopGene, es decir, el gen con el padj más pequeño, de cada una de las tres comparaciones realizadas (SFI-NIT, ELI-NIT y ELI-SFI, respectivamente). Estas gráficas son interesantes porque en realidad podemos hacer comparación entre los tres grupos y no solo los tres principales.
+
+En la Figura \@ref(fig:fig9), vemos que el gen representado se encuentra regulado negativamente (tiene menos conteos) para el grupo de NIT que para los otros dos grupos. En la Figura \@ref(fig:fig10), observamos que el gen representado parece estar regulado positivamente en el grupo ELI con respecto a los grupos NIT y SFI. Finalmente, en la Figura \@ref(fig:fig11), el gen representado parece estar regulado positivamente en el grupo ELI con respecto a los grupos NIT y SFI.
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+topGeneSFI_NIT <- rownames(resSFI_NIT)[which.min(resSFI_NIT$padj)]
+plotCounts(ddsMat, gene = topGeneSFI_NIT, intgroup=c("Group"))
+```
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+topGeneresELI_NIT <- rownames(resELI_NIT)[which.min(resELI_NIT$padj)]
+plotCounts(ddsMat, gene = topGeneresELI_NIT, intgroup=c("Group"))
+```
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+topGeneresELI_SFI <- rownames(resELI_SFI)[which.min(resELI_SFI$padj)]
+plotCounts(ddsMat, gene = topGeneresELI_SFI, intgroup=c("Group"))
+```
+
+```{r fig9, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráficos de conteos del topgen entre SFI-NIT (ENSG00000211937) normalizados sobre cada grupo."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/topGeneSFI_NIT.png")
+```
+
+```{r fig10, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráficos de conteos del topgen entre ELI-NIT (ENSG00000117322) normalizados sobre cada grupo."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/topGeneELI_NIT.png")
+```
+
+```{r fig11, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Gráficos de conteos del topgen entre ELI-SFI (ENSG00000227507) normalizados sobre cada grupo."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/topGeneELI_SFI.png")
+```
+
 
 # Post-procesado de las listas de genes obtenidas
 
-## Comparaciones múltiples
-
 ## Anotación de resultados
 
-### Tablas de anotaciones sencillas
+Nuestras tablas de resultados contienen los identificadores de genes de Ensembl, pero los nombres de los genes podrían darnos más información que nos permita interpretar los resultados obtenidos. Bioconductor tiene varios paquetes que permiten la anotación de genes, por ejemplo, el paquete *AnnotationDbi* y el paquete de anotación *org.Hs.eg.db*.
 
-### Archivos de resultados con tablas hiperenlazables
+```{r}
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+```
+
+Este es el paquete de anotación de organismos ("org") para *Homo sapiens* ("Hs"), organizado como un paquete *AnnotationDbi* de base de datos ("db"), usando identificadores de genes Entrez ("eg") como clave primaria. Para obtener una lista de todas las claves disponible utilizamos el siguiente código:
+
+```{r}
+columns(org.Hs.eg.db)
+```
+
+Podemos utilizar la función *mapIds* para añadir columnas individuales a nuestra tabla de resultados. Utilizaremos el nombre de las filas de la tabla de resultados como clave y específicamos a la función ```keytype=ENSEMBL```. El argumento columna le dice a la función *mapIds* la información que queremos y el argumento ```multiVals``` le dice la función qué hacer si hay múltiples valores posibles para un único valor de input.
+
+**SFI-NIT**
+
+```{r}
+SFI_NITens.str <- substr(rownames(resSFI_NIT), 1, 15)
+resSFI_NIT$symbol <- mapIds(org.Hs.eg.db,
+                     keys=SFI_NITens.str,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSFI_NIT$entrez <- mapIds(org.Hs.eg.db,
+                     keys=SFI_NITens.str,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+**ELI-NIT**
+
+```{r}
+ELI_NITens.str <- substr(rownames(resELI_NIT), 1, 15)
+resELI_NIT$symbol <- mapIds(org.Hs.eg.db,
+                     keys=ELI_NITens.str,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resELI_NIT$entrez <- mapIds(org.Hs.eg.db,
+                     keys=ELI_NITens.str,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+
+**ELI-SFI**
+
+```{r}
+ELI_SFIens.str <- substr(rownames(resELI_SFI), 1, 15)
+resELI_SFI$symbol <- mapIds(org.Hs.eg.db,
+                     keys=ELI_SFIens.str,
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resELI_SFI$entrez <- mapIds(org.Hs.eg.db,
+                     keys=ELI_SFIens.str,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+Ahora ya tenemos los resultados de los genes con su símbolo (nombre corto del gen) y su identificador de entrez.
+
+**SFI-NIT**
+
+```{r}
+resSFI_NITOrdered <- resSFI_NIT[order(resSFI_NIT$pvalue),]
+head(resSFI_NITOrdered)
+```
+
+**ELI-NIT**
+
+```{r}
+resELI_NITOrdered <- resELI_NIT[order(resELI_NIT$pvalue),]
+head(resELI_NITOrdered)
+```
+
+**ELI-SFI**
+
+```{r}
+resELI_SFIOrdered <- resELI_SFI[order(resELI_SFI$pvalue),]
+head(resELI_SFIOrdered)
+```
+
+Si nos fijamos en la tabla de la comparación SFI-NIT muchas de las entradas nos aparecen con NAs tras la anotación (tanto en la columna Symbol como en la columna de entrez). Sin embargo, esto no lo observamos en las otras dos comparaciones. Esto puede ser debido a que, como ya hemos visto anteriormente la comparación SFI-NIT es en la que se veían menos genes diferencialmente expresados. 
+
+### Exportando resultados
+
+Podemos exportar los resultados en formato CSV y así poder verlos en programas como Excel. Para ello, primero tendremos que convertir la tabla de resultados en un objeto tipo Dataframe y luego podemos procesarlo con la función *write.csv*.
+
+**SFI-NIT**
+
+```{r}
+resSFI_NITOrderedDF <- as.data.frame(resSFI_NIT)[1:100, ]
+write.csv(resSFI_NITOrderedDF, file=file.path(resultsDir, "resSFI_NITOrderedDF.csv"))
+```
+
+**ELI-NIT**
+
+```{r}
+resELI_NITOrderedDF <- as.data.frame(resELI_NIT)[1:100, ]
+write.csv(resELI_NITOrderedDF, file=file.path(resultsDir, "resELI_NITOrderedDF.csv"))
+```
+
+**ELI-SFI**
+
+```{r}
+resELI_SFIOrderedDF <- as.data.frame(resELI_SFI)[1:100, ]
+write.csv(resELI_SFIOrderedDF, file=file.path(resultsDir, "resELI_SFIOrderedDF.csv"))
+```
+
 
 ## Visualización de los perfiles de expresión
 
+Tras seleccionar los genes diferencialmente expresados podemos visualizar las expresiones up o down reguladas mediante mapas de color o *Heatmaps*. Primero tendremos que seleccionar los genes a visualizar.
+
+En la Figura \@ref(fig:fig12) encontramos un mapa de color en el que podemos ver las 30 muestras diferenciadas según su grupo y su sexo y los 20 genes con mayor varianza entre muestras. Podemos ver con los colores los genes que están regulados positivamente (color rojo) o negativamente (color azul) en cada una de las muestras. Además, estas se agrupan de acuerdo a el parecido entre sí. Es curioso ver que sí que hay genes que se expresan de forma diferencial entre hombres y mujeres a pesar de pertenecer al mismo grupo.
+
+```{r results = 'hide', message=FALSE, fig.show = 'hide'}
+library("genefilter")
+library("SummarizedExperiment")
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+mat  <- assay(vsd)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("Group","sex")])
+pheatmap(mat, annotation_col = anno)
+```
+
+```{r fig12, echo=FALSE, out.width='60%', fig.align='center', fig.cap="Mapa de color de los valores transformados por VST en todas las muestras."}
+knitr::include_graphics("D:/Users/Carmen/Desktop/Carmen/Curso_2019-2020/Master_bioinformatica_bioestadistica/ADO/PEC2/imagenes/pheatmap.png")
+```
+
 ## Análisis de la significación biológica (1): Análisis de enriquecimiento
 
-## Análisis de la significación biológica (2): Expresión diferencial de conjuntos de genes
+Los análisis de significación biológica buscan establecer qué funciones de los genes de la lista de genes obtenida se observan con más frecuencia. En este trabajo llevaremos a cabo un análisis básico de enriquecimiento utilizando el paquete ```GOstats``` de Bioconductor.
 
-# Resumen de resultados y discusión
+Este análisis se realiza sobre dos bases de datos de anotaciones, Gene Ontology o la Kyoto Encyclopedia of Genes and Genomes. Los análisis de este tipo necesitan un número mínimo de genes para resultar fiables por lo que se incluirán en todos los genes con p-valores ajustados inferiores a 0.05.
 
-## Discusión
+```{r eval=FALSE}
+require(annotate)
+require(hgu133a.db)
+require(GOstats)
+listOfTables <- list(SFIVsNIT = resSFI_NITOrderedDF, ELIVsNIT = resELI_NITOrderedDF, ELIVsSFI = resELI_SFIOrderedDF)
+for (i in 1:length(listOfTables))
+# Seleccionamos la "topTable"
+topTab <- listOfTables[[i]]
+# Definimos el universo de genes: todos los que se han incluido en el análisis
+# EL programa trabaja con identificadores "entrez" y no admite duplicados
+entrezUniverse = unique(getEG(topTab["entrez"], "hgu133a.db"))
+# Escogemos los grupos de sondas a incluir en el análisis
+# Este análisis trabaja bien con varios centenares de genes
+# por lo que es habitual basarse en p-valores sin ajustar para incluirlos
+whichGenes<-topTab["padj"]<0.05
+geneIds <- unique(entrezUniverse[whichGenes])
+# Creamos los "hiperparámetros" en que se basa el análisis
+GOparams = new("GOHyperGParams",
+geneIds=geneIds, universeGeneIds=entrezUniverse,
+annotation="org.Hs.eg.db", ontology="BP",
+pvalueCutoff=0.001, conditional=FALSE,
+testDirection="over")
+# KEGGparams = new("KEGGHyperGParams",
+# geneIds=geneIds, universeGeneIds=entrezUniverse,
+# annotation="org.Hs.eg.db",
+# pvalueCutoff=0.01, testDirection="over")
+# Ejecutamos los análisis
+GOhyper = hyperGTest(GOparams)
+# KEGGhyper = hyperGTest(KEGGparams)
+# Creamos un informe html con los resultados
+comparison = names(listOfTables)[i]
+GOfilename =file.path(resultsDir,
+paste("GOResults.",comparison,".html", sep=""))
+# KEGGfilename =file.path(resultsDir,
+# paste("KEGGResults.",comparison,".html", sep=""))
+htmlReport(GOhyper, file = GOfilename, summary.args=list("htmlLinks"=TRUE))
+# htmlReport(KEGGhyper, file = KEGGfilename, summary.args=list("htmlLinks"=TRUE))
+```
+
+# Discusión
+
+En esta PEC hemos conseguido realizar un análisis de unos datos de RNA-seq, obteniendo los genes diferencialmente expresados para tres comparaciones distintas, de tres grupos. Sin embargo, no he conseguido realizar el análisis de significación biológica porque en las listas de genes con códigos entrez encontrábamos varios NA's y otros problemas de código.
+
+Hay varias cosas interesantes a destacar de este análisis. La normalización de los datos la hemos realizado con Variance Stabilizing Transformation (VST) porque no cogía los datos de los genes con pocos conteos que podrían producir ruido en nuestro análisis. 
+
+De los grupos analizados parece que el grupo SFI-NIT son más parecidos entre sí que cualquiera de estos dos con ELI dado que encontramos menos genes diferencialmente expresados. También hemos encontrado a la hora de realizar los heatmaps de los genes que el sexo parece influir en la expresión génica.
+
+Hemos conseguido anotar los genes resultantes por símbolo y número de identificación de entrez, sin embargo, parece que hay problemas a la hora de realizar esta anotación para los genes de la comparación SFI-NIT.
+
+En general, las mayores diferencias en cuanto a la expresión de genes se encuentran entre el grupo Extensive lymphoid infiltrates (ELI) con los otros dos grupos. 
 
 # Bibliografía
